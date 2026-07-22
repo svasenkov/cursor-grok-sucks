@@ -1,11 +1,14 @@
 #!/usr/bin/env python
-"""Keep Cursor Grok* models out of local Cursor state.
+"""Keep Cursor Grok* models out of Cursor.
 
-Removes Grok from the model catalog (availableDefaultModels2) and preference
-overrides. Workaround for Cursor re-enabling / nudging Grok:
+1. Scrubs local state.vscdb preferences / catalog cache.
+2. Patches Cursor workbench JS so Grok* is filtered from Settings / picker
+   (disk-only writes do not update the live UI — Cursor keeps state in RAM).
+
+Workaround for:
 https://forum.cursor.com/t/grok-re-enables-itself-after-being-disabled-in-settings/165894
 
-Unofficial. Reads/writes Cursor's local SQLite state DB only.
+Unofficial. Not affiliated with Cursor or xAI.
 """
 
 from __future__ import annotations
@@ -13,6 +16,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sqlite3
 import sys
 import time
@@ -21,6 +25,25 @@ from pathlib import Path
 STORAGE_KEY = (
     "src.vs.platform.reactivestorage.browser.reactiveStorageServiceImpl"
     ".persistentStorage.applicationUser"
+)
+
+PATCH_MARKER = "/*grok-sucks*/"
+
+# Visibility helper used by Settings → Models and the model picker.
+# Desktop: e.filter(...); Glass: t.filter(...) — only the predicate differs in context.
+FILTER_PRED_OLD = 'r=>!i||r.name!=="default"'
+FILTER_PRED_NEW = (
+    'r=>(!i||r.name!=="default")&&!/^grok/i.test(r.name||"")' + PATCH_MARKER
+)
+
+# Catalog loader: availableDefaultModels2??[]).map(IDENT)
+CATALOG_MAP_RE = re.compile(
+    r"(availableDefaultModels2\?\?\[\]\))\.map\(([A-Za-z_$][\w$]*)\)"
+)
+CATALOG_MAP_PATCHED_RE = re.compile(
+    r"(availableDefaultModels2\?\?\[\]\))\.map\(([A-Za-z_$][\w$]*)\)"
+    r"\.filter\(_gs=>!/\^grok/i\.test\(_gs\.name\|\|\"\"\)\)"
+    + re.escape(PATCH_MARKER)
 )
 
 
@@ -42,6 +65,117 @@ def state_db_path() -> Path:
     return Path.home() / ".config/Cursor/User/globalStorage/state.vscdb"
 
 
+def workbench_paths() -> list[Path]:
+    names = ("workbench.desktop.main.js", "workbench.glass.main.js")
+    roots: list[Path] = []
+    if sys.platform == "darwin":
+        roots.append(Path("/Applications/Cursor.app/Contents/Resources/app"))
+        roots.append(
+            Path.home() / "Applications/Cursor.app/Contents/Resources/app"
+        )
+    elif sys.platform == "win32":
+        local = os.environ.get("LOCALAPPDATA", "")
+        if local:
+            roots.append(Path(local) / "Programs/cursor/resources/app")
+            roots.append(Path(local) / "Programs/Cursor/resources/app")
+    else:
+        roots.extend(
+            [
+                Path("/usr/share/cursor/resources/app"),
+                Path("/usr/lib/cursor/resources/app"),
+                Path("/opt/cursor/resources/app"),
+                Path.home() / ".local/share/cursor/resources/app",
+            ]
+        )
+
+    found: list[Path] = []
+    for root in roots:
+        for name in names:
+            path = root / "out/vs/workbench" / name
+            if path.is_file() and path not in found:
+                found.append(path)
+    return found
+
+
+def _catalog_repl(match: re.Match[str]) -> str:
+    return (
+        f"{match.group(1)}.map({match.group(2)})"
+        f'.filter(_gs=>!/^grok/i.test(_gs.name||"")){PATCH_MARKER}'
+    )
+
+
+def patch_file(path: Path, *, undo: bool = False, dry_run: bool = False) -> list[str]:
+    actions: list[str] = []
+    text = path.read_text(encoding="utf-8", errors="surrogateescape")
+    original = text
+
+    if undo:
+        if PATCH_MARKER not in text:
+            return []
+        text = text.replace(FILTER_PRED_NEW, FILTER_PRED_OLD)
+        text = CATALOG_MAP_PATCHED_RE.sub(r"\1.map(\2)", text)
+        text = text.replace(
+            f'.filter(_gs=>!/^grok/i.test(_gs.name||"")){PATCH_MARKER}',
+            "",
+        )
+        if text == original:
+            return []
+        actions.append(f"unpatch {path.name}")
+    else:
+        if FILTER_PRED_NEW in text and CATALOG_MAP_PATCHED_RE.search(text):
+            return []
+
+        if FILTER_PRED_OLD in text:
+            text = text.replace(FILTER_PRED_OLD, FILTER_PRED_NEW)
+            actions.append(f"patch filter {path.name}")
+        elif FILTER_PRED_NEW not in text:
+            actions.append(f"skip filter {path.name} (pattern not found)")
+
+        if not CATALOG_MAP_PATCHED_RE.search(text):
+            new_text, n = CATALOG_MAP_RE.subn(_catalog_repl, text, count=1)
+            if n:
+                text = new_text
+                actions.append(f"patch catalog {path.name}")
+            elif CATALOG_MAP_RE.search(original):
+                actions.append(f"skip catalog {path.name} (pattern not found)")
+
+        if text == original:
+            return [a for a in actions if a.startswith("skip")] or []
+
+    if dry_run:
+        return actions
+
+    path.write_text(text, encoding="utf-8", errors="surrogateescape")
+    return actions
+
+
+def apply_workbench_patch(*, undo: bool = False, dry_run: bool = False) -> list[str]:
+    paths = workbench_paths()
+    if not paths:
+        return ["workbench: not found (is Cursor installed?)"]
+
+    actions: list[str] = []
+    for path in paths:
+        try:
+            actions.extend(patch_file(path, undo=undo, dry_run=dry_run))
+        except PermissionError:
+            actions.append(f"permission denied: {path}")
+        except OSError as exc:
+            actions.append(f"error {path.name}: {exc}")
+    return actions
+
+
+def workbench_status() -> None:
+    paths = workbench_paths()
+    if not paths:
+        print("workbench: (not found)")
+        return
+    for path in paths:
+        text = path.read_text(encoding="utf-8", errors="ignore")
+        patched = PATCH_MARKER in text
+        print(f"workbench: {'PATCHED' if patched else 'not patched'}  {path}")
+
+
 def pick_fallback(ai: dict, preferred: str | None) -> str:
     enabled = [m for m in (ai.get("modelOverrideEnabled") or []) if not is_grok(m)]
     if preferred and not is_grok(preferred):
@@ -56,7 +190,6 @@ def pick_fallback(ai: dict, preferred: str | None) -> str:
 
 
 def _drop_grok_ids(items: list | None) -> tuple[list, list[str]]:
-    """Return (kept, removed_grok_ids)."""
     kept: list = []
     removed: list[str] = []
     for item in items or []:
@@ -104,7 +237,6 @@ def scrub_ai_settings(ai: dict, fallback: str) -> list[str]:
         for surface, value in list(prev.items()):
             if not isinstance(value, str):
                 continue
-            # may be comma-separated ensemble
             parts = [p.strip() for p in value.split(",")]
             kept = [p for p in parts if not is_grok(p)]
             if kept != parts:
@@ -146,7 +278,6 @@ def scrub_ai_settings(ai: dict, fallback: str) -> list[str]:
 
 
 def scrub_catalog(root: dict) -> list[str]:
-    """Remove Grok* entries from availableDefaultModels2 (Settings / picker catalog)."""
     catalog = root.get("availableDefaultModels2")
     if not isinstance(catalog, list):
         return []
@@ -305,17 +436,25 @@ def print_status(db: Path) -> None:
     print(f"grok enabled:    {enabled or '(none)'}")
     print(f"grok disabled:   {disabled or '(none)'}")
     print(f"composer model:  {composer}")
+    workbench_status()
+
+
+def _log(actions: list[str]) -> None:
+    if not actions:
+        return
+    ts = time.strftime("%H:%M:%S")
+    print(f"[{ts}] " + "; ".join(actions), flush=True)
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Disable Cursor Grok* models in local Cursor state"
+        description="Remove Cursor Grok* from local state and the Models UI"
     )
     parser.add_argument(
         "command",
         nargs="?",
         default="watch",
-        choices=("once", "watch", "status"),
+        choices=("once", "watch", "status", "patch", "unpatch"),
     )
     parser.add_argument(
         "--interval",
@@ -333,6 +472,11 @@ def main() -> None:
         action="store_true",
         help="also scrub featureModelConfigs fallbacks / subagent defaults",
     )
+    parser.add_argument(
+        "--no-patch",
+        action="store_true",
+        help="do not patch Cursor workbench JS (state DB only)",
+    )
     parser.add_argument("--dry-run", action="store_true", help="print actions only")
     parser.add_argument("--db", type=Path, default=None, help="override path to state.vscdb")
     args = parser.parse_args()
@@ -342,27 +486,54 @@ def main() -> None:
         print_status(db)
         return
 
-    def run() -> list[str]:
-        actions = apply(db, args.fallback, args.hard, args.dry_run)
-        if actions:
-            ts = time.strftime("%H:%M:%S")
-            print(f"[{ts}] " + "; ".join(actions), flush=True)
+    if args.command == "patch":
+        actions = apply_workbench_patch(dry_run=args.dry_run)
+        _log(actions or ["workbench already patched"])
+        if actions and not args.dry_run and not any("not found" in a for a in actions):
+            print("Restart Cursor (or Developer: Reload Window) for the UI list to update.")
+        return
+
+    if args.command == "unpatch":
+        actions = apply_workbench_patch(undo=True, dry_run=args.dry_run)
+        _log(actions or ["workbench was not patched"])
+        if actions and not args.dry_run:
+            print("Restart Cursor (or Developer: Reload Window) to restore the stock UI.")
+        return
+
+    def run_state() -> list[str]:
+        return apply(db, args.fallback, args.hard, args.dry_run)
+
+    def run_all() -> list[str]:
+        actions = run_state()
+        if not args.no_patch:
+            # Re-apply patch if a Cursor update overwrote workbench files.
+            actions.extend(apply_workbench_patch(dry_run=args.dry_run))
         return actions
 
     if args.command == "once":
-        actions = run()
+        actions = run_all()
+        _log(actions)
         if not actions:
             print("already clean")
+        elif not args.no_patch and any(a.startswith("patch ") for a in actions):
+            print("Restart Cursor (or Developer: Reload Window) for the UI list to update.")
         return
 
     print(
         f"watching {db} every {args.interval}s "
-        f"(fallback={args.fallback}, hard={args.hard})",
+        f"(fallback={args.fallback}, hard={args.hard}, patch={not args.no_patch})",
         flush=True,
     )
+    if not args.no_patch:
+        # Patch once at start; watch keeps state clean and re-patches after updates.
+        _log(apply_workbench_patch(dry_run=args.dry_run) or ["workbench already patched"])
+        print(
+            "If Grok is still in Settings, restart Cursor once so the workbench patch loads.",
+            flush=True,
+        )
     while True:
         try:
-            run()
+            _log(run_all())
         except Exception as exc:  # noqa: BLE001 — keep watcher alive
             print(f"[error] {exc}", flush=True)
         time.sleep(args.interval)
