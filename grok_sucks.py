@@ -277,12 +277,39 @@ def scrub_ai_settings(ai: dict, fallback: str) -> list[str]:
     return actions
 
 
+def catalog_backup_path() -> Path:
+    return Path.home() / ".grok-sucks" / "catalog-entries.json"
+
+
+def backup_catalog_entries(entries: list) -> None:
+    if not entries:
+        return
+    path = catalog_backup_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    by_name: dict[str, dict] = {}
+    if path.is_file():
+        try:
+            for item in json.loads(path.read_text(encoding="utf-8")):
+                if isinstance(item, dict) and item.get("name"):
+                    by_name[str(item["name"])] = item
+        except (json.JSONDecodeError, OSError):
+            pass
+    for entry in entries:
+        if isinstance(entry, dict) and entry.get("name"):
+            by_name[str(entry["name"])] = entry
+    path.write_text(
+        json.dumps(list(by_name.values()), ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+
+
 def scrub_catalog(root: dict) -> list[str]:
     catalog = root.get("availableDefaultModels2")
     if not isinstance(catalog, list):
         return []
 
     kept = []
+    removed_entries: list = []
     removed: list[str] = []
     for entry in catalog:
         name = ""
@@ -292,14 +319,80 @@ def scrub_catalog(root: dict) -> list[str]:
             name = entry
         if is_grok(name):
             removed.append(name)
+            if isinstance(entry, dict):
+                removed_entries.append(entry)
         else:
             kept.append(entry)
 
     if not removed:
         return []
 
+    backup_catalog_entries(removed_entries)
     root["availableDefaultModels2"] = kept
     return [f"catalog remove {m}" for m in removed]
+
+
+def restore_catalog(root: dict, model_ids: list[str]) -> list[str]:
+    catalog = root.get("availableDefaultModels2")
+    if not isinstance(catalog, list):
+        catalog = []
+        root["availableDefaultModels2"] = catalog
+
+    present = {
+        str(e.get("name") or e.get("serverModelName") or "")
+        for e in catalog
+        if isinstance(e, dict)
+    }
+    actions: list[str] = []
+    backup: list = []
+    path = catalog_backup_path()
+    if path.is_file():
+        try:
+            backup = json.loads(path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            backup = []
+
+    for model_id in model_ids:
+        if model_id in present:
+            continue
+        entry = next(
+            (e for e in backup if isinstance(e, dict) and e.get("name") == model_id),
+            None,
+        )
+        if entry:
+            catalog.append(entry)
+            actions.append(f"catalog restore {model_id}")
+        else:
+            actions.append(f"catalog missing {model_id} (refresh Models in Cursor)")
+
+    root["availableDefaultModels2"] = catalog
+    return actions
+
+
+def restore_ai_settings(ai: dict, model_id: str, *, select: bool) -> list[str]:
+    actions: list[str] = []
+    enabled = list(ai.get("modelOverrideEnabled") or [])
+    disabled = list(ai.get("modelOverrideDisabled") or [])
+
+    if model_id in disabled:
+        disabled = [m for m in disabled if m != model_id]
+        actions.append(f"override undisable {model_id}")
+    if model_id not in enabled:
+        enabled.append(model_id)
+        actions.append(f"override enable {model_id}")
+    ai["modelOverrideEnabled"] = enabled
+    ai["modelOverrideDisabled"] = disabled
+
+    if select:
+        model_config = ai.get("modelConfig") or {}
+        composer = model_config.get("composer")
+        if isinstance(composer, dict):
+            composer["modelName"] = model_id
+            composer["selectedModels"] = [{"modelId": model_id, "parameters": []}]
+            model_config["composer"] = composer
+            ai["modelConfig"] = model_config
+            actions.append(f"composer: -> {model_id}")
+    return actions
 
 
 def scrub_feature_configs(root: dict, fallback: str) -> list[str]:
@@ -357,6 +450,61 @@ def load_ai(db: Path) -> dict:
     if not isinstance(ai, dict):
         raise SystemExit("aiSettings missing in Cursor storage")
     return root
+
+
+def apply_restore(
+    db: Path,
+    model_id: str,
+    *,
+    select: bool,
+    dry_run: bool,
+) -> list[str]:
+    if not db.is_file():
+        raise SystemExit(f"Cursor state DB not found: {db}")
+
+    last_err: Exception | None = None
+    for _ in range(5):
+        try:
+            con = sqlite3.connect(str(db), timeout=10)
+            try:
+                con.execute("BEGIN IMMEDIATE")
+                row = con.execute(
+                    "SELECT value FROM ItemTable WHERE key = ?", (STORAGE_KEY,)
+                ).fetchone()
+                if not row:
+                    raise SystemExit(f"Missing storage key in {db}")
+
+                root = json.loads(row[0])
+                ai = root.get("aiSettings")
+                if not isinstance(ai, dict):
+                    raise SystemExit("aiSettings missing in Cursor storage")
+
+                actions = restore_ai_settings(ai, model_id, select=select)
+                actions.extend(restore_catalog(root, [model_id]))
+
+                if not actions:
+                    con.rollback()
+                    return []
+
+                if dry_run:
+                    con.rollback()
+                    return actions
+
+                root["aiSettings"] = ai
+                root["SPECIAL_KEY_lastUpdatedTimeInUnixSeconds"] = time.time()
+                payload = json.dumps(root, ensure_ascii=False, separators=(",", ":"))
+                con.execute(
+                    "UPDATE ItemTable SET value = ? WHERE key = ?",
+                    (payload, STORAGE_KEY),
+                )
+                con.commit()
+                return actions
+            finally:
+                con.close()
+        except sqlite3.OperationalError as e:
+            last_err = e
+            time.sleep(0.2)
+    raise SystemExit(f"SQLite error after retries: {last_err}")
 
 
 def apply(db: Path, fallback_pref: str | None, hard: bool, dry_run: bool) -> list[str]:
@@ -454,7 +602,7 @@ def main() -> None:
         "command",
         nargs="?",
         default="watch",
-        choices=("once", "watch", "status", "patch", "unpatch"),
+        choices=("once", "watch", "status", "patch", "unpatch", "restore"),
     )
     parser.add_argument(
         "--interval",
@@ -473,9 +621,19 @@ def main() -> None:
         help="also scrub featureModelConfigs fallbacks / subagent defaults",
     )
     parser.add_argument(
+        "--model",
+        default="grok-4.5",
+        help="grok model id for restore (default: grok-4.5)",
+    )
+    parser.add_argument(
+        "--select",
+        action="store_true",
+        help="with restore: set composer to --model",
+    )
+    parser.add_argument(
         "--no-patch",
         action="store_true",
-        help="do not patch Cursor workbench JS (state DB only)",
+        help="with once/watch: do not patch workbench; with restore: skip unpatch",
     )
     parser.add_argument("--dry-run", action="store_true", help="print actions only")
     parser.add_argument("--db", type=Path, default=None, help="override path to state.vscdb")
@@ -498,6 +656,25 @@ def main() -> None:
         _log(actions or ["workbench was not patched"])
         if actions and not args.dry_run:
             print("Restart Cursor (or Developer: Reload Window) to restore the stock UI.")
+        return
+
+    if args.command == "restore":
+        actions: list[str] = []
+        if not args.no_patch:
+            actions.extend(apply_workbench_patch(undo=True, dry_run=args.dry_run))
+        actions.extend(
+            apply_restore(db, args.model, select=args.select, dry_run=args.dry_run)
+        )
+        _log(actions or ["already restored"])
+        if not args.dry_run:
+            print(
+                "Restart Cursor (or Developer: Reload Window) so Grok shows in Settings again."
+            )
+            if not catalog_backup_path().is_file():
+                print(
+                    "Tip: if Grok is missing from the list, hit refresh in Settings → Models "
+                    "or open Cursor once without watch running."
+                )
         return
 
     def run_state() -> list[str]:

@@ -45,8 +45,17 @@ python grok_sucks.py once --hard
 # Workbench patch only
 python grok_sucks.py patch
 
-# Remove workbench patch
+# Remove workbench patch only
 python grok_sucks.py unpatch
+
+# Full restore: unpatch UI + re-enable Grok in state (restart Cursor after)
+python grok_sucks.py restore
+
+# Restore and select Grok as composer model
+python grok_sucks.py restore --select
+
+# Restore without touching workbench (state only)
+python grok_sucks.py restore --no-patch
 
 # Poll every 5s (re-scrubs state; re-applies patch after Cursor updates)
 python grok_sucks.py watch --interval 5 --fallback composer-2.5 --hard
@@ -59,7 +68,9 @@ python grok_sucks.py watch --interval 5 --fallback composer-2.5 --hard
 | `--interval` | `5` | Seconds between polls in `watch` |
 | `--fallback` | `composer-2.5` | Model to select when a surface was on Grok |
 | `--hard` | off | Also scrub `featureModelConfigs` fallbacks / subagent defaults |
-| `--no-patch` | off | State DB only (UI list will keep showing Grok) |
+| `--model` | `grok-4.5` | Grok id to restore with `restore` |
+| `--select` | off | With `restore`: set composer to `--model` |
+| `--no-patch` | off | `once`/`watch`: skip workbench patch; `restore`: skip unpatch |
 | `--dry-run` | off | Print actions, do not write |
 | `--db` | auto | Override path to `state.vscdb` |
 
