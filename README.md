@@ -1,10 +1,11 @@
 # cursor-grok-sucks
 
-## The problem
-
-Grok model auto-enables after disabling it in Cursor. Nice product hack, Elon, but **NO**.
-
-[forum.cursor.com/t/grok-re-enables-itself-after-being-disabled-in-settings/165894](https://forum.cursor.com/t/grok-re-enables-itself-after-being-disabled-in-settings/165894)
+> [!CAUTION]
+> **The problem**
+>
+> Grok model auto-enables after disabling it in Cursor. Nice product hack, Elon, but **NO**.
+>
+> [forum.cursor.com/t/grok-re-enables-itself-after-being-disabled-in-settings/165894](https://forum.cursor.com/t/grok-re-enables-itself-after-being-disabled-in-settings/165894)
 
 Remove **Cursor Grok\*** from Settings → Models and keep it from coming back.
 
