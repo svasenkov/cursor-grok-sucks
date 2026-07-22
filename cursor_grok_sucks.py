@@ -27,14 +27,19 @@ STORAGE_KEY = (
     ".persistentStorage.applicationUser"
 )
 
-PATCH_MARKER = "/*grok-sucks*/"
+PATCH_MARKER = "/*cursor-grok-sucks*/"
+LEGACY_PATCH_MARKER = "/*grok-sucks*/"
 
 # Visibility helper used by Settings → Models and the model picker.
-# Desktop: e.filter(...); Glass: t.filter(...) — only the predicate differs in context.
 FILTER_PRED_OLD = 'r=>!i||r.name!=="default"'
 FILTER_PRED_NEW = (
     'r=>(!i||r.name!=="default")&&!/^grok/i.test(r.name||"")' + PATCH_MARKER
 )
+LEGACY_FILTER_PRED_NEW = (
+    'r=>(!i||r.name!=="default")&&!/^grok/i.test(r.name||"")' + LEGACY_PATCH_MARKER
+)
+
+CATALOG_FILTER_SUFFIX = '.filter(_gs=>!/^grok/i.test(_gs.name||""))'
 
 # Catalog loader: availableDefaultModels2??[]).map(IDENT)
 CATALOG_MAP_RE = re.compile(
@@ -43,7 +48,7 @@ CATALOG_MAP_RE = re.compile(
 CATALOG_MAP_PATCHED_RE = re.compile(
     r"(availableDefaultModels2\?\?\[\]\))\.map\(([A-Za-z_$][\w$]*)\)"
     r"\.filter\(_gs=>!/\^grok/i\.test\(_gs\.name\|\|\"\"\)\)"
-    + re.escape(PATCH_MARKER)
+    r"(?:/\*cursor-grok-sucks\*/|/\*grok-sucks\*/)"
 )
 
 
@@ -104,31 +109,34 @@ def _catalog_repl(match: re.Match[str]) -> str:
     )
 
 
+def _is_patched(text: str) -> bool:
+    return PATCH_MARKER in text or LEGACY_PATCH_MARKER in text
+
+
 def patch_file(path: Path, *, undo: bool = False, dry_run: bool = False) -> list[str]:
     actions: list[str] = []
     text = path.read_text(encoding="utf-8", errors="surrogateescape")
     original = text
 
     if undo:
-        if PATCH_MARKER not in text:
+        if not _is_patched(text):
             return []
         text = text.replace(FILTER_PRED_NEW, FILTER_PRED_OLD)
+        text = text.replace(LEGACY_FILTER_PRED_NEW, FILTER_PRED_OLD)
         text = CATALOG_MAP_PATCHED_RE.sub(r"\1.map(\2)", text)
-        text = text.replace(
-            f'.filter(_gs=>!/^grok/i.test(_gs.name||"")){PATCH_MARKER}',
-            "",
-        )
+        for marker in (PATCH_MARKER, LEGACY_PATCH_MARKER):
+            text = text.replace(f"{CATALOG_FILTER_SUFFIX}{marker}", "")
         if text == original:
             return []
         actions.append(f"unpatch {path.name}")
     else:
-        if FILTER_PRED_NEW in text and CATALOG_MAP_PATCHED_RE.search(text):
+        if _is_patched(text) and CATALOG_MAP_PATCHED_RE.search(text):
             return []
 
-        if FILTER_PRED_OLD in text:
+        if FILTER_PRED_OLD in text and not _is_patched(text):
             text = text.replace(FILTER_PRED_OLD, FILTER_PRED_NEW)
             actions.append(f"patch filter {path.name}")
-        elif FILTER_PRED_NEW not in text:
+        elif not _is_patched(text):
             actions.append(f"skip filter {path.name} (pattern not found)")
 
         if not CATALOG_MAP_PATCHED_RE.search(text):
@@ -172,7 +180,7 @@ def workbench_status() -> None:
         return
     for path in paths:
         text = path.read_text(encoding="utf-8", errors="ignore")
-        patched = PATCH_MARKER in text
+        patched = _is_patched(text)
         print(f"workbench: {'PATCHED' if patched else 'not patched'}  {path}")
 
 
@@ -278,7 +286,14 @@ def scrub_ai_settings(ai: dict, fallback: str) -> list[str]:
 
 
 def catalog_backup_path() -> Path:
-    return Path.home() / ".grok-sucks" / "catalog-entries.json"
+    new_dir = Path.home() / ".cursor-grok-sucks"
+    legacy_dir = Path.home() / ".grok-sucks"
+    if not new_dir.is_dir() and legacy_dir.is_dir():
+        try:
+            legacy_dir.rename(new_dir)
+        except OSError:
+            pass
+    return new_dir / "catalog-entries.json"
 
 
 def backup_catalog_entries(entries: list) -> None:

@@ -1,4 +1,4 @@
-# grok-sucks
+# cursor-grok-sucks
 
 Remove **Cursor Grok\*** from Settings → Models and keep it from coming back.
 
@@ -29,36 +29,36 @@ No pip packages.
 ## Install
 
 ```bash
-git clone https://github.com/svasenkov/grok-sucks.git
-cd grok-sucks
+git clone https://github.com/svasenkov/cursor-grok-sucks.git
+cd cursor-grok-sucks
 ```
 
 ## Usage
 
 ```bash
 # Status: state DB + whether workbench is patched
-python grok_sucks.py status
+python cursor_grok_sucks.py status
 
 # Patch workbench + scrub state (then RESTART Cursor)
-python grok_sucks.py once --hard
+python cursor_grok_sucks.py once --hard
 
 # Workbench patch only
-python grok_sucks.py patch
+python cursor_grok_sucks.py patch
 
 # Remove workbench patch only
-python grok_sucks.py unpatch
+python cursor_grok_sucks.py unpatch
 
 # Full restore: unpatch UI + re-enable Grok in state (restart Cursor after)
-python grok_sucks.py restore
+python cursor_grok_sucks.py restore
 
 # Restore and select Grok as composer model
-python grok_sucks.py restore --select
+python cursor_grok_sucks.py restore --select
 
 # Restore without touching workbench (state only)
-python grok_sucks.py restore --no-patch
+python cursor_grok_sucks.py restore --no-patch
 
 # Poll every 5s (re-scrubs state; re-applies patch after Cursor updates)
-python grok_sucks.py watch --interval 5 --fallback composer-2.5 --hard
+python cursor_grok_sucks.py watch --interval 5 --fallback composer-2.5 --hard
 ```
 
 **After `patch` / first `once`: fully quit and reopen Cursor** (or Command Palette → “Developer: Reload Window”). The Models list is built at load time.
@@ -82,7 +82,7 @@ Any model id whose name starts with `grok` (case-insensitive), e.g. `grok-4.5`, 
 
 ### Workbench patch (UI)
 
-Edits (with marker `/*grok-sucks*/`):
+Edits (with marker `/*cursor-grok-sucks*/`):
 
 - `…/out/vs/workbench/workbench.desktop.main.js`
 - `…/out/vs/workbench/workbench.glass.main.js`
@@ -105,13 +105,23 @@ After a **Cursor update**, files are replaced — run `patch` / `watch` again, t
 | Linux | `~/.config/Cursor/User/globalStorage/state.vscdb` |
 | Windows | `%APPDATA%\Cursor\User\globalStorage/state.vscdb` |
 
-Scrubs `availableDefaultModels2`, `modelOverride*`, active `modelConfig`, and (with `--hard`) `featureModelConfigs`.
+Scrubs `availableDefaultModels2`, `modelOverride*`, active `modelConfig`, and (with `--hard`) `featureModelConfigs`. Removed catalog entries are backed up to `~/.cursor-grok-sucks/catalog-entries.json` for `restore`.
+
+## Restore Grok
+
+```bash
+python cursor_grok_sucks.py restore              # unpatch + re-enable in state
+python cursor_grok_sucks.py restore --select     # also set composer to grok-4.5
+python cursor_grok_sucks.py restore --model grok-4.5 --no-patch   # state only
+```
+
+Then **restart Cursor**. If the model row is still missing, use **refresh** in Settings → Models — Cursor re-fetches the catalog from the server.
 
 ## Autostart (optional)
 
 ### macOS LaunchAgent
 
-Save as `~/Library/LaunchAgents/com.grok-sucks.plist` (edit paths):
+Save as `~/Library/LaunchAgents/com.cursor-grok-sucks.plist` (edit paths):
 
 ```xml
 <?xml version="1.0" encoding="UTF-8"?>
@@ -120,11 +130,11 @@ Save as `~/Library/LaunchAgents/com.grok-sucks.plist` (edit paths):
 <plist version="1.0">
 <dict>
   <key>Label</key>
-  <string>com.grok-sucks</string>
+  <string>com.cursor-grok-sucks</string>
   <key>ProgramArguments</key>
   <array>
     <string>/usr/bin/python3</string>
-    <string>/PATH/TO/grok-sucks/grok_sucks.py</string>
+    <string>/PATH/TO/cursor-grok-sucks/cursor_grok_sucks.py</string>
     <string>watch</string>
     <string>--interval</string>
     <string>5</string>
@@ -135,29 +145,29 @@ Save as `~/Library/LaunchAgents/com.grok-sucks.plist` (edit paths):
   <key>KeepAlive</key>
   <true/>
   <key>StandardOutPath</key>
-  <string>/tmp/grok-sucks.log</string>
+  <string>/tmp/cursor-grok-sucks.log</string>
   <key>StandardErrorPath</key>
-  <string>/tmp/grok-sucks.err</string>
+  <string>/tmp/cursor-grok-sucks.err</string>
 </dict>
 </plist>
 ```
 
 ```bash
-launchctl load ~/Library/LaunchAgents/com.grok-sucks.plist
+launchctl load ~/Library/LaunchAgents/com.cursor-grok-sucks.plist
 ```
 
 Still run `once` / `patch` once after install (and after Cursor updates), then restart Cursor so the UI patch loads.
 
 ### Linux (systemd user)
 
-`~/.config/systemd/user/grok-sucks.service`:
+`~/.config/systemd/user/cursor-grok-sucks.service`:
 
 ```ini
 [Unit]
 Description=Keep Cursor Grok disabled
 
 [Service]
-ExecStart=/usr/bin/python3 /PATH/TO/grok-sucks/grok_sucks.py watch --interval 5 --hard
+ExecStart=/usr/bin/python3 /PATH/TO/cursor-grok-sucks/cursor_grok_sucks.py watch --interval 5 --hard
 Restart=always
 
 [Install]
@@ -165,7 +175,7 @@ WantedBy=default.target
 ```
 
 ```bash
-systemctl --user enable --now grok-sucks.service
+systemctl --user enable --now cursor-grok-sucks.service
 ```
 
 ## Limits
@@ -173,7 +183,7 @@ systemctl --user enable --now grok-sucks.service
 - **Unofficial** — Cursor updates may change minified symbols; `patch` will report `pattern not found`.
 - Patching the app may affect code signature / Gatekeeper on some systems.
 - Does not claim to control **server-side** Auto routing if Grok is chosen off-machine.
-- If you intentionally want Grok back: `python grok_sucks.py unpatch` and restart.
+- If you intentionally want Grok back: `python cursor_grok_sucks.py restore` and restart Cursor.
 
 ## License
 
