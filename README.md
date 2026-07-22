@@ -1,8 +1,14 @@
 # cursor-grok-sucks
 
+## The problem
+
+Grok model auto-enables after disabling it in Cursor. Nice product hack, Elon, but **NO**.
+
+[forum.cursor.com/t/grok-re-enables-itself-after-being-disabled-in-settings/165894](https://forum.cursor.com/t/grok-re-enables-itself-after-being-disabled-in-settings/165894)
+
 Remove **Cursor Grok\*** from Settings → Models and keep it from coming back.
 
-Cursor sometimes re-enables Grok after you turn it off, and nudges new chats toward it ([forum report](https://forum.cursor.com/t/grok-re-enables-itself-after-being-disabled-in-settings/165894), acknowledged by Cursor staff). That can push billing via Auto / recommended model.
+Cursor sometimes re-enables Grok after you turn it off, and nudges new chats toward it (acknowledged by Cursor staff). That can push billing via Auto / recommended model.
 
 This is a tiny **stdlib-only** Python script that:
 
