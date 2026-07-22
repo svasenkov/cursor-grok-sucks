@@ -1,7 +1,8 @@
 #!/usr/bin/env python
-"""Keep Cursor Grok* models disabled in local Cursor state.
+"""Keep Cursor Grok* models out of local Cursor state.
 
-Workaround for Cursor re-enabling Grok after you turn it off in Settings:
+Removes Grok from the model catalog (availableDefaultModels2) and preference
+overrides. Workaround for Cursor re-enabling / nudging Grok:
 https://forum.cursor.com/t/grok-re-enables-itself-after-being-disabled-in-settings/165894
 
 Unofficial. Reads/writes Cursor's local SQLite state DB only.
@@ -54,23 +55,61 @@ def pick_fallback(ai: dict, preferred: str | None) -> str:
     return enabled[0] if enabled else "default"
 
 
+def _drop_grok_ids(items: list | None) -> tuple[list, list[str]]:
+    """Return (kept, removed_grok_ids)."""
+    kept: list = []
+    removed: list[str] = []
+    for item in items or []:
+        if is_grok(str(item)):
+            removed.append(str(item))
+        else:
+            kept.append(item)
+    return kept, removed
+
+
 def scrub_ai_settings(ai: dict, fallback: str) -> list[str]:
     actions: list[str] = []
-    seen_grok: set[str] = set()
 
-    enabled = list(ai.get("modelOverrideEnabled") or [])
-    disabled = list(ai.get("modelOverrideDisabled") or [])
-
-    grok_on = [m for m in enabled if is_grok(m)]
-    if grok_on:
-        enabled = [m for m in enabled if not is_grok(m)]
-        for m in grok_on:
-            seen_grok.add(m)
-            if m not in disabled:
-                disabled.append(m)
-            actions.append(f"toggle off {m}")
+    enabled, removed_on = _drop_grok_ids(ai.get("modelOverrideEnabled"))
+    disabled, removed_off = _drop_grok_ids(ai.get("modelOverrideDisabled"))
+    if removed_on or removed_off:
         ai["modelOverrideEnabled"] = enabled
         ai["modelOverrideDisabled"] = disabled
+        for m in removed_on + removed_off:
+            actions.append(f"override remove {m}")
+
+    no_switch, removed_ns = _drop_grok_ids(ai.get("modelsWithNoDefaultSwitch"))
+    if removed_ns:
+        ai["modelsWithNoDefaultSwitch"] = no_switch
+        actions.append(f"modelsWithNoDefaultSwitch: -{','.join(removed_ns)}")
+
+    last_used = ai.get("modelLastUsedAt")
+    if isinstance(last_used, dict):
+        drop = [k for k in last_used if is_grok(k)]
+        if drop:
+            for k in drop:
+                del last_used[k]
+            actions.append(f"modelLastUsedAt: -{','.join(drop)}")
+
+    params = ai.get("modelParameterPreferences")
+    if isinstance(params, dict):
+        drop = [k for k in params if is_grok(k)]
+        if drop:
+            for k in drop:
+                del params[k]
+            actions.append(f"modelParameterPreferences: -{','.join(drop)}")
+
+    prev = ai.get("previousModelBeforeDefault")
+    if isinstance(prev, dict):
+        for surface, value in list(prev.items()):
+            if not isinstance(value, str):
+                continue
+            # may be comma-separated ensemble
+            parts = [p.strip() for p in value.split(",")]
+            kept = [p for p in parts if not is_grok(p)]
+            if kept != parts:
+                prev[surface] = ",".join(kept) if kept else fallback
+                actions.append(f"previousModelBeforeDefault.{surface} scrubbed")
 
     model_config = ai.get("modelConfig") or {}
     for surface, cfg in model_config.items():
@@ -81,7 +120,6 @@ def scrub_ai_settings(ai: dict, fallback: str) -> list[str]:
         surface_changed = False
 
         if is_grok(name):
-            seen_grok.add(name)
             cfg["modelName"] = fallback
             surface_changed = True
 
@@ -89,7 +127,6 @@ def scrub_ai_settings(ai: dict, fallback: str) -> list[str]:
         for item in selected:
             mid = (item or {}).get("modelId", "")
             if is_grok(mid):
-                seen_grok.add(mid)
                 new_selected.append({"modelId": fallback, "parameters": []})
                 surface_changed = True
             else:
@@ -105,17 +142,33 @@ def scrub_ai_settings(ai: dict, fallback: str) -> list[str]:
             actions.append(f"{surface}: -> {fallback}")
 
     ai["modelConfig"] = model_config
-
-    if seen_grok:
-        enabled = [m for m in (ai.get("modelOverrideEnabled") or []) if m not in seen_grok]
-        disabled = list(ai.get("modelOverrideDisabled") or [])
-        for m in sorted(seen_grok):
-            if m not in disabled:
-                disabled.append(m)
-        ai["modelOverrideEnabled"] = enabled
-        ai["modelOverrideDisabled"] = disabled
-
     return actions
+
+
+def scrub_catalog(root: dict) -> list[str]:
+    """Remove Grok* entries from availableDefaultModels2 (Settings / picker catalog)."""
+    catalog = root.get("availableDefaultModels2")
+    if not isinstance(catalog, list):
+        return []
+
+    kept = []
+    removed: list[str] = []
+    for entry in catalog:
+        name = ""
+        if isinstance(entry, dict):
+            name = str(entry.get("name") or entry.get("serverModelName") or "")
+        elif isinstance(entry, str):
+            name = entry
+        if is_grok(name):
+            removed.append(name)
+        else:
+            kept.append(entry)
+
+    if not removed:
+        return []
+
+    root["availableDefaultModels2"] = kept
+    return [f"catalog remove {m}" for m in removed]
 
 
 def scrub_feature_configs(root: dict, fallback: str) -> list[str]:
@@ -198,6 +251,7 @@ def apply(db: Path, fallback_pref: str | None, hard: bool, dry_run: bool) -> lis
 
                 fallback = pick_fallback(ai, fallback_pref)
                 actions = scrub_ai_settings(ai, fallback)
+                actions.extend(scrub_catalog(root))
                 if hard:
                     actions.extend(scrub_feature_configs(root, fallback))
 
@@ -226,16 +280,31 @@ def apply(db: Path, fallback_pref: str | None, hard: bool, dry_run: bool) -> lis
     raise SystemExit(f"SQLite error after retries: {last_err}")
 
 
+def _catalog_grok_names(root: dict) -> list[str]:
+    catalog = root.get("availableDefaultModels2") or []
+    names: list[str] = []
+    for entry in catalog:
+        if isinstance(entry, dict):
+            name = str(entry.get("name") or entry.get("serverModelName") or "")
+        else:
+            name = str(entry)
+        if is_grok(name):
+            names.append(name)
+    return names
+
+
 def print_status(db: Path) -> None:
     root = load_ai(db)
     ai = root["aiSettings"]
     enabled = [m for m in (ai.get("modelOverrideEnabled") or []) if is_grok(m)]
     disabled = [m for m in (ai.get("modelOverrideDisabled") or []) if is_grok(m)]
+    catalog = _catalog_grok_names(root)
     composer = (ai.get("modelConfig") or {}).get("composer", {}).get("modelName")
     print(f"db: {db}")
-    print(f"grok enabled:  {enabled or '(none)'}")
-    print(f"grok disabled: {disabled or '(none)'}")
-    print(f"composer model: {composer}")
+    print(f"grok in catalog: {catalog or '(none)'}")
+    print(f"grok enabled:    {enabled or '(none)'}")
+    print(f"grok disabled:   {disabled or '(none)'}")
+    print(f"composer model:  {composer}")
 
 
 def main() -> None:

@@ -1,10 +1,10 @@
 # grok-sucks
 
-Keep **Cursor Grok\*** models disabled in local Cursor settings.
+Remove **Cursor Grok\*** from the local model list and keep it gone.
 
 Cursor sometimes re-enables Grok after you turn it off in **Settings → Models**, and nudges new chats toward it. That can push you onto a more expensive path via Auto / recommended model. See the [forum report](https://forum.cursor.com/t/grok-re-enables-itself-after-being-disabled-in-settings/165894) (acknowledged by Cursor staff).
 
-This is a tiny **stdlib-only** Python script that writes the same preference flags the Models UI uses — directly in Cursor’s local state DB — and optionally polls so Grok stays off.
+This is a tiny **stdlib-only** Python script that removes Grok from Cursor’s local model catalog and preference flags — the same data the Models UI uses — and optionally polls so it stays gone.
 
 > Unofficial. Not affiliated with Cursor or xAI. Storage format can change on Cursor updates. Use at your own risk.
 
@@ -28,7 +28,7 @@ cd grok-sucks
 # What Cursor currently has for Grok / composer
 python grok_sucks.py status
 
-# One-shot: disable Grok* toggles; move active surfaces off Grok
+# One-shot: remove Grok* from catalog + overrides; move active surfaces off Grok
 python grok_sucks.py once
 
 # Preview without writing
@@ -67,14 +67,18 @@ Cursor stores Models toggles in SQLite:
 
 Key: `…persistentStorage.applicationUser` → `aiSettings`:
 
-- `modelOverrideEnabled` / `modelOverrideDisabled` — Settings → Models toggles
+- `availableDefaultModels2` — Settings → Models list / picker catalog
+- `modelOverrideEnabled` / `modelOverrideDisabled` — per-model toggles
 - `modelConfig.*.modelName` / `selectedModels` — active picker per surface
 
 On each pass the script:
 
-1. Moves every `grok*` id from **enabled** to **disabled**
-2. If composer / cmd-k / etc. is on Grok, switches it to `--fallback`
-3. With `--hard`, removes Grok from `featureModelConfigs` fallback lists and explore subagent default
+1. Removes every `grok*` entry from **`availableDefaultModels2`** (Settings → Models list / picker catalog)
+2. Drops `grok*` from `modelOverrideEnabled` / `modelOverrideDisabled` and related preference maps
+3. If composer / cmd-k / etc. is on Grok, switches it to `--fallback`
+4. With `--hard`, also scrubs `featureModelConfigs` fallback lists and explore subagent default
+
+Cursor may re-download the model catalog; `watch` removes Grok again when it reappears.
 
 Writes only when something actually changed. Uses `BEGIN IMMEDIATE` and retries on `database is locked`.
 
