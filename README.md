@@ -7,6 +7,8 @@
 >
 > [forum.cursor.com/t/grok-re-enables-itself-after-being-disabled-in-settings/165894](https://forum.cursor.com/t/grok-re-enables-itself-after-being-disabled-in-settings/165894)
 
+![Grok re-enables itself in Settings → Models after you turn it off](screens/1.png)
+
 Remove **Cursor Grok\*** from Settings → Models and keep it from coming back.
 
 Cursor sometimes re-enables Grok after you turn it off, and nudges new chats toward it (acknowledged by Cursor staff). That can push billing via Auto / recommended model.
@@ -112,7 +114,7 @@ After a **Cursor update**, files are replaced — run `patch` / `watch` again, t
 | Linux | `~/.config/Cursor/User/globalStorage/state.vscdb` |
 | Windows | `%APPDATA%\Cursor\User\globalStorage/state.vscdb` |
 
-Scrubs `availableDefaultModels2`, `modelOverride*`, active `modelConfig`, and (with `--hard`) `featureModelConfigs`. Removed catalog entries are backed up to `~/.cursor-grok-sucks/catalog-entries.json` for `restore`.
+Scrubs `availableDefaultModels2`, moves every `grok*` id into `modelOverrideDisabled` (and out of `modelOverrideEnabled`), fixes active `modelConfig`, and (with `--hard`) `featureModelConfigs`. Removed catalog entries are backed up to `~/.cursor-grok-sucks/catalog-entries.json` for `restore`.
 
 ## Restore Grok
 
@@ -140,7 +142,7 @@ Save as `~/Library/LaunchAgents/com.cursor-grok-sucks.plist` (edit paths):
   <string>com.cursor-grok-sucks</string>
   <key>ProgramArguments</key>
   <array>
-    <string>/usr/bin/python3</string>
+    <string>/usr/bin/python</string>
     <string>/PATH/TO/cursor-grok-sucks/cursor_grok_sucks.py</string>
     <string>watch</string>
     <string>--interval</string>
@@ -174,7 +176,7 @@ Still run `once` / `patch` once after install (and after Cursor updates), then r
 Description=Keep Cursor Grok disabled
 
 [Service]
-ExecStart=/usr/bin/python3 /PATH/TO/cursor-grok-sucks/cursor_grok_sucks.py watch --interval 5 --hard
+ExecStart=/usr/bin/python /PATH/TO/cursor-grok-sucks/cursor_grok_sucks.py watch --interval 5 --hard
 Restart=always
 
 [Install]
@@ -191,7 +193,10 @@ systemctl --user enable --now cursor-grok-sucks.service
 - Patching the app may affect code signature / Gatekeeper on some systems.
 - Does not claim to control **server-side** Auto routing if Grok is chosen off-machine.
 - If you intentionally want Grok back: `python cursor_grok_sucks.py restore` and restart Cursor.
+- After a **Cursor update**, if `patch` fails or Grok reappears and nothing here helps — [open an issue](https://github.com/svasenkov/cursor-grok-sucks/issues). Auto-healing for broken patches may come later.
 
 ## License
 
 MIT
+
+![Grok absent from Settings → Models and the chat model picker after patch + scrub](screens/2.png)

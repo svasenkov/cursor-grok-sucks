@@ -208,16 +208,39 @@ def _drop_grok_ids(items: list | None) -> tuple[list, list[str]]:
     return kept, removed
 
 
-def scrub_ai_settings(ai: dict, fallback: str) -> list[str]:
+def collect_grok_ids(root: dict, ai: dict) -> set[str]:
+    ids: set[str] = set()
+    for m in (ai.get("modelOverrideEnabled") or []) + (ai.get("modelOverrideDisabled") or []):
+        if is_grok(str(m)):
+            ids.add(str(m))
+    for name in _catalog_grok_names(root):
+        ids.add(name)
+    for m in ai.get("modelsWithNoDefaultSwitch") or []:
+        if is_grok(str(m)):
+            ids.add(str(m))
+    return ids
+
+
+def scrub_ai_settings(ai: dict, fallback: str, grok_ids: set[str] | None = None) -> list[str]:
     actions: list[str] = []
 
-    enabled, removed_on = _drop_grok_ids(ai.get("modelOverrideEnabled"))
-    disabled, removed_off = _drop_grok_ids(ai.get("modelOverrideDisabled"))
-    if removed_on or removed_off:
-        ai["modelOverrideEnabled"] = enabled
-        ai["modelOverrideDisabled"] = disabled
-        for m in removed_on + removed_off:
-            actions.append(f"override remove {m}")
+    enabled = list(ai.get("modelOverrideEnabled") or [])
+    disabled = list(ai.get("modelOverrideDisabled") or [])
+    targets = grok_ids or {m for m in enabled + disabled if is_grok(str(m))}
+
+    was_enabled = {str(m) for m in enabled if is_grok(str(m))}
+    new_enabled = [m for m in enabled if not is_grok(str(m))]
+    if new_enabled != enabled:
+        for m in was_enabled:
+            actions.append(f"override disable {m}")
+        ai["modelOverrideEnabled"] = new_enabled
+
+    for model_id in sorted(targets):
+        if model_id not in disabled:
+            disabled.append(model_id)
+            if model_id not in was_enabled:
+                actions.append(f"override add-disabled {model_id}")
+    ai["modelOverrideDisabled"] = disabled
 
     no_switch, removed_ns = _drop_grok_ids(ai.get("modelsWithNoDefaultSwitch"))
     if removed_ns:
@@ -544,7 +567,8 @@ def apply(db: Path, fallback_pref: str | None, hard: bool, dry_run: bool) -> lis
                     raise SystemExit("aiSettings missing in Cursor storage")
 
                 fallback = pick_fallback(ai, fallback_pref)
-                actions = scrub_ai_settings(ai, fallback)
+                grok_ids = collect_grok_ids(root, ai)
+                actions = scrub_ai_settings(ai, fallback, grok_ids)
                 actions.extend(scrub_catalog(root))
                 if hard:
                     actions.extend(scrub_feature_configs(root, fallback))
@@ -596,8 +620,8 @@ def print_status(db: Path) -> None:
     composer = (ai.get("modelConfig") or {}).get("composer", {}).get("modelName")
     print(f"db: {db}")
     print(f"grok in catalog: {catalog or '(none)'}")
-    print(f"grok enabled:    {enabled or '(none)'}")
-    print(f"grok disabled:   {disabled or '(none)'}")
+    print(f"grok enabled:    {enabled or '(none)'}  (should be empty)")
+    print(f"grok disabled:   {disabled or '(none)'}  (want grok ids here)")
     print(f"composer model:  {composer}")
     workbench_status()
 
